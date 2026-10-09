@@ -1,0 +1,147 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function role() {
+      return get(/databases/$(database)/documents/utilisateurs/$(request.auth.uid)).data.role;
+    }
+    function estTresorier() { return request.auth != null && role() in ['tresorier', 'president']; }
+    function estPresident() { return request.auth != null && role() == 'president'; }
+
+    match /utilisateurs/{userId} {
+      // La création est désormais réservée au serveur (endpoint creer-membre, qui
+      // vérifie le code d'accès quotidien pour tout nouveau membre) — un utilisateur
+      // authentifié via Google ne peut plus s'auto-inscrire directement depuis le
+      // navigateur en écrivant ce document lui-même.
+      allow create: if false;
+      allow read: if request.auth != null;
+      allow update: if request.auth != null && request.auth.uid == userId
+                      && request.resource.data.role == resource.data.role
+                    || estPresident();
+      allow delete: if estPresident();
+    }
+
+    // Soldes des membres : réservé au président uniquement. Le trésorier n'a
+    // AUCUN accès direct ici — ses dépôts/retraits passent obligatoirement
+    // par l'endpoint serveur qui applique le plafond. C'est ce qui protège
+    // le système de plafond : impossible de le contourner en écrivant
+    // directement le solde, même en tant que trésorier.
+    match /tontine/membres {
+      allow read: if request.auth != null;
+      allow write: if estPresident();
+    }
+
+    // Paramètres généraux (frais, taux, durée…) : président uniquement.
+    match /tontine/parametres {
+      allow read: if request.auth != null;
+      allow write: if estPresident();
+    }
+
+    // Tout autre document sous tontine/ : verrouillé par défaut.
+    match /tontine/{document} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Transactions : création par trésorier/président (nécessaire pour
+    // prêts, remboursements, dépôts/retraits manuels), mais JAMAIS de
+    // modification ou suppression côté client — seule l'annulation
+    // sécurisée (serveur, Admin SDK) peut supprimer une transaction.
+    // Transactions : un membre ne peut lire que SES PROPRES transactions
+    // (celles où membreEmail correspond à son email), le trésorier/président
+    // voit tout. Empêche la lecture de la collection entière même via la
+    // console du navigateur. Création par trésorier/président uniquement ;
+    // jamais de modification/suppression côté client.
+    match /transactions/{transaction} {
+      allow read: if estTresorier() || (request.auth != null && resource.data.membreEmail == request.auth.token.email);
+      allow create: if estTresorier();
+      allow update, delete: if false;
+    }
+
+    match /prets/{pret} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if estTresorier();
+    }
+
+    match /benefices/{benefice} {
+      allow read: if request.auth != null;
+      allow write: if estPresident();
+    }
+
+    match /plafonds/{tresorierUid} {
+      allow read: if estPresident();
+      allow write: if false;
+    }
+
+    match /reversements/{document} {
+      allow read: if estPresident();
+      allow write: if false;
+    }
+
+    // ─── VERROUILLAGES D'ÉPARGNE ───
+    // Le membre crée sa propre demande (statut initial toujours "en_attente" — jamais
+    // "actif" directement, ça empêcherait tout contrôle). Le trésorier/président gère
+    // ensuite l'approbation, le refus et la négociation directement depuis son propre
+    // client (même modèle de confiance que pour tontine/membres : sa session peut déjà
+    // écrire les soldes directement). Un membre peut uniquement refuser une négociation
+    // proposée sur SA PROPRE demande — jamais faire passer un verrouillage à "actif",
+    // "termine" ou "rompu" lui-même : ces transitions déplacent de l'argent et passent
+    // obligatoirement par l'endpoint serveur (Admin SDK), qui ignore ces règles.
+    match /verrouillages/{id} {
+      allow read: if request.auth != null
+                  && (resource.data.membreEmail == request.auth.token.email || estTresorier());
+      allow create: if request.auth != null
+                    && request.resource.data.membreEmail == request.auth.token.email
+                    && request.resource.data.statut == 'en_attente';
+      allow update: if estTresorier()
+                    || (request.auth != null
+                        && resource.data.membreEmail == request.auth.token.email
+                        && resource.data.statut == 'negociation'
+                        && request.resource.data.statut == 'refuse');
+      allow delete: if false;
+    }
+
+    // ─── DEMANDES DE RUPTURE ANTICIPÉE ───
+    // Même logique : le membre crée sa demande, seul le trésorier/président peut
+    // l'approuver ou la refuser (l'approbation applique la pénalité et recrédite le
+    // solde depuis sa propre session, déjà autorisée sur tontine/membres).
+    match /demandesRupture/{id} {
+      allow read: if request.auth != null
+                  && (resource.data.membreEmail == request.auth.token.email || estTresorier());
+      allow create: if request.auth != null
+                    && request.resource.data.membreEmail == request.auth.token.email
+                    && request.resource.data.statut == 'en_attente';
+      allow update: if estTresorier();
+      allow delete: if false;
+    }
+
+    // ─── NOTIFICATIONS ───
+    // Un membre ne lit que ses propres notifications, ou celles adressées à "tous",
+    // ou celles adressées à "president" s'il l'est réellement (empêche la fuite où
+    // n'importe quel membre voyait les demandes financières des autres, comme la
+    // cloche le montrait avant correction). Création libre pour tout utilisateur
+    // connecté (le système génère ces notifications depuis différentes sessions
+    // membres). Modification limitée au seul champ "lu" (marquer comme lu), et
+    // seulement par le destinataire concerné ou le trésorier/président.
+    match /notifications/{id} {
+      allow read: if request.auth != null
+                  && (resource.data.destinataire == request.auth.token.email
+                      || resource.data.destinataire == 'tous'
+                      || (resource.data.destinataire == 'president' && estTresorier()));
+      allow create: if request.auth != null;
+      allow update: if request.auth != null
+                    && (resource.data.destinataire == request.auth.token.email || estTresorier())
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lu']);
+      allow delete: if false;
+    }
+
+    // ─── FORMULAIRE DE CONTACT ───
+    // Écriture libre pour tout utilisateur connecté (envoi du formulaire), lecture
+    // réservée au président (suivi des messages).
+    match /contacts/{id} {
+      allow read: if estPresident();
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+  }
+}

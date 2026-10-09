@@ -1,0 +1,10 @@
+{
+  "name": "okr-tontine-fedapay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "fedapay": "^1.2.5",
+    "firebase-admin": "^12.0.0"
+  }
+}
