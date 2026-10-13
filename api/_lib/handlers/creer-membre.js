@@ -1,5 +1,5 @@
 const admin = require('firebase-admin');
-const { verifierCode } = require('./_lib/code-acces');
+const { verifierCode } = require('../_lib/code-acces');
 
 function initFirebaseAdmin() {
   if (admin.apps.length) return;
