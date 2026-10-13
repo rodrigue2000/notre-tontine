@@ -10,7 +10,7 @@
 //                          ailleurs que dans les variables d'environnement Vercel.
 
 const admin = require('firebase-admin');
-const { codesValides } = require('../_lib/code-acces');
+const { codesValides } = require('../code-acces');
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
